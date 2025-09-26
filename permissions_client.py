@@ -5,6 +5,9 @@ import logging
 import asyncio
 import aiohttp
 import os
+import csv
+import sys
+from datetime import datetime
 from dotenv import load_dotenv
 
 class KualiPermissionsClient:
@@ -387,17 +390,74 @@ class KualiPermissionsClient:
         
         return asyncio.run(fetch_members())
     
+    async def get_kuali_group_or_role_members_async(self, session: aiohttp.ClientSession, group_or_role_id: str) -> List[Dict[str, Any]]:
+        """
+        Fetch members of a Kuali group or role (async).
+        If the ID contains ':', treats it as a role ID (group_id:role_identifier).
+        Otherwise, treats it as a group ID and looks for the 'members' role.
+        
+        Args:
+            session: The aiohttp session to use for requests
+            group_or_role_id: Either a group ID or composite role ID (group_id:role_identifier)
+            
+        Returns:
+            List of user dictionaries from the specified group/role
+        """
+        if ':' in group_or_role_id:
+            # Handle as role ID
+            group_id, role_identifier = group_or_role_id.split(':', 1)
+            target_role_key = 'id'
+            target_role_value = role_identifier
+            context_name = f"role {group_or_role_id}"
+        else:
+            # Handle as group ID
+            group_id = group_or_role_id
+            target_role_key = 'id'
+            target_role_value = 'members'
+            context_name = f"group {group_id}"
+        
+        group_url = f"{self.base_url}/api/v1/groups/{group_id}"
+        headers = {
+            "authorization": f"Bearer {self.auth_token}",
+            "content-type": "application/json"
+        }
+        
+        async with session.get(group_url, headers=headers) as response:
+            response.raise_for_status()
+            group_data = await response.json()
+        
+        # Find the target role
+        roles = group_data.get('roles', [])
+        target_role = next((role for role in roles if role.get(target_role_key) == target_role_value), None)
+        
+        if not target_role:
+            logging.warning(f"No role with {target_role_key} '{target_role_value}' found in {context_name}")
+            return []
+        
+        # Get user data for each member
+        member_ids = target_role.get('value', [])
+        if not member_ids:
+            return []
+        
+        # Fetch all members concurrently
+        tasks = []
+        for member_id in member_ids:
+            tasks.append(self._fetch_user_safe(session, member_id, context_name))
+        
+        results = await asyncio.gather(*tasks)
+        return [user for user in results if user is not None]
+    
     async def _fetch_user_safe(self, session: aiohttp.ClientSession, user_id: str, context: str) -> Optional[Dict[str, Any]]:
         """Helper method to safely fetch a user with error handling."""
         try:
             return await self.get_kuali_user_async(session, user_id)
-        except Exception as e:
+        except Exception:
             logging.exception(f"Failed to get user data for {user_id} in {context}")
             return None
     
-    async def resolve_identities_to_users_async(self, session: aiohttp.ClientSession, identities: List[Dict[str, Any]], app_name: str, permission_type: str) -> List[str]:
+    async def resolve_identities_to_users_async(self, session: aiohttp.ClientSession, identities: List[Dict[str, Any]], app_name: str, permission_type: str) -> List[Dict[str, Any]]:
         """
-        Resolve a list of identities (users, roles, groups) to actual user strings (async).
+        Resolve a list of identities (users, roles, groups) to actual user objects (async).
         
         Args:
             session: The aiohttp session to use for requests
@@ -406,9 +466,10 @@ class KualiPermissionsClient:
             permission_type: Type of permission (for logging purposes)
             
         Returns:
-            List of user strings in formatted output
+            List of user objects
         """
         user_tasks = []
+        users = []
         
         for identity in identities:
             identity_type = identity.get('type')
@@ -419,42 +480,28 @@ class KualiPermissionsClient:
                 user_tasks.append(self._fetch_user_safe(session, identity_id, f"{permission_type} for {app_name}"))
             elif identity_type in ['ROLE', 'GROUP']:
                 try:
-                    # Get group/role members (this part is still sync but much less of the bottleneck)
-                    group_users = self.get_kuali_group_or_role_members(identity_id)
-                    # Add tasks for users that weren't already fetched by the group/role method
-                    for user in group_users:
-                        if user:  # Only add non-None users
-                            user_tasks.append(asyncio.create_task(self._return_user(user)))
-                except Exception as e:
+                    # Get group/role members using async method
+                    group_users = await self.get_kuali_group_or_role_members_async(session, identity_id)
+                    # Add users directly to the list (they're already fetched)
+                    users.extend([user for user in group_users if user])
+                except Exception:
                     logging.exception(f"Failed to get members for {identity_type} {identity_id}")
             else:
-                logging.warning(f"{identity_type} {identity_label} has {permission_type} access on app {app_name}.")
+                if identity_label in ['faculty', 'staff', 'faculty (*all*)', 'staff (*all*)'] and permission_type != 'ADMIN':
+                    logging.debug(f"{identity_type} has {identity_label} for non-admin permission on app {app_name}.")
+                else:
+                    logging.warning(f"{identity_type} {identity_label} has {permission_type} access on app {app_name}.")
         
-        # Fetch all users concurrently
+        # Fetch individual users concurrently
         if user_tasks:
-            users = await asyncio.gather(*user_tasks)
-            users = [user for user in users if user is not None]
-        else:
-            users = []
+            individual_users = await asyncio.gather(*user_tasks)
+            users.extend([user for user in individual_users if user is not None])
         
-        # Convert user objects to formatted strings
-        user_strings = []
-        for user in users:
-            user_id = user.get('id')
-            user_email = user.get('email', 'no-email')
-            user_school_id = user.get('schoolId', 'no-school-id')
-            display_name = user.get('displayName', user.get('name', 'Unknown'))
-            user_strings.append(f"{user_email}: {display_name} ({user_school_id}) [{user_id}]")
-        
-        return user_strings
+        return users
     
-    async def _return_user(self, user: Dict[str, Any]) -> Dict[str, Any]:
-        """Helper method to return a user object as a coroutine."""
-        return user
-    
-    def resolve_identities_to_users(self, identities: List[Dict[str, Any]], app_name: str, permission_type: str) -> List[str]:
+    def resolve_identities_to_users(self, identities: List[Dict[str, Any]], app_name: str, permission_type: str) -> List[Dict[str, Any]]:
         """
-        Resolve a list of identities (users, roles, groups) to actual user strings (sync wrapper).
+        Resolve a list of identities (users, roles, groups) to actual user objects (sync wrapper).
         
         Args:
             identities: List of identity objects from policy groups
@@ -462,7 +509,7 @@ class KualiPermissionsClient:
             permission_type: Type of permission (for logging purposes)
             
         Returns:
-            List of user strings in formatted output
+            List of user objects
         """
         async def resolve_async():
             connector = aiohttp.TCPConnector(limit=100, limit_per_host=50)
@@ -471,11 +518,12 @@ class KualiPermissionsClient:
         
         return asyncio.run(resolve_async())
     
-    def evaluate_permissions_data(self, data: Dict[str, Any]) -> Dict[str, Any]:
+    async def evaluate_permissions_data_async(self, session: aiohttp.ClientSession, data: Dict[str, Any]) -> Dict[str, Any]:
         """
-        Evaluate and process the permissions data returned from the GraphQL query.
+        Evaluate and process the permissions data returned from the GraphQL query (async).
         
         Args:
+            session: The aiohttp session to use for requests
             data: Raw GraphQL response data
             
         Returns:
@@ -509,15 +557,15 @@ class KualiPermissionsClient:
                     
                     if effect == 'allow':
                         if 'apps:administer' in actions:
-                            user_strings = self.resolve_identities_to_users(identities, app_data.get('name'), 'ADMIN')
-                            admin_users.extend(user_strings)
+                            user_objects = await self.resolve_identities_to_users_async(session, identities, app_data.get('name'), 'ADMIN')
+                            admin_users.extend(user_objects)
                         elif 'apps:readDocuments' in actions:
-                            user_strings = self.resolve_identities_to_users(identities, app_data.get('name'), 'READ_DOCUMENTS')
-                            read_document_users.extend(user_strings)
+                            user_objects = await self.resolve_identities_to_users_async(session, identities, app_data.get('name'), 'READ_DOCUMENTS')
+                            read_document_users.extend(user_objects)
         
-        # Remove duplicates while preserving order
-        admin_users = list(set(admin_users))
-        read_document_users = list(set(read_document_users))
+        # Remove duplicates while preserving order (using user ID as unique key)
+        admin_users = list({user.get('id'): user for user in admin_users if user}.values())
+        read_document_users = list({user.get('id'): user for user in read_document_users if user}.values())
         
         return {
             'success': True,
@@ -527,6 +575,23 @@ class KualiPermissionsClient:
             'admin_users': admin_users,
             'read_document_users': read_document_users
         }
+    
+    def evaluate_permissions_data(self, data: Dict[str, Any]) -> Dict[str, Any]:
+        """
+        Evaluate and process the permissions data returned from the GraphQL query (sync wrapper).
+        
+        Args:
+            data: Raw GraphQL response data
+
+        Returns:
+            Simplified permissions report with only requested data
+        """
+        async def evaluate_async():
+            connector = aiohttp.TCPConnector(limit=100, limit_per_host=50)
+            async with aiohttp.ClientSession(connector=connector) as session:
+                return await self.evaluate_permissions_data_async(session, data)
+        
+        return asyncio.run(evaluate_async())
     
     def get_and_evaluate_permissions(self, app_id: str) -> Dict[str, Any]:
         """
@@ -558,23 +623,23 @@ class KualiPermissionsClient:
             
             try:
                 raw_data = await self.get_permissions_data_async(session, app_id)
-                report = self.evaluate_permissions_data(raw_data)
+                report = await self.evaluate_permissions_data_async(session, raw_data)
                 
                 if report.get('success'):
-                    return ('success', report)
+                    return 'success', report
                 else:
-                    return ('failed', {
+                    return 'failed', {
                         'app_id': app_id,
                         'app_name': app_name,
                         'error': report.get('errors', 'Unknown error')
-                    })
+                    }
             except Exception as e:
                 logging.exception(f"Failed to get permissions for {app_name} ({app_id})")
-                return ('failed', {
+                return 'failed', {
                     'app_id': app_id,
                     'app_name': app_name,
                     'error': str(e)
-                })
+                }
         
         # Process all apps in this batch concurrently
         results = await asyncio.gather(*[process_single_app(app) for app in apps_batch])
@@ -665,13 +730,122 @@ class KualiPermissionsClient:
         """
         return asyncio.run(self.generate_all_permissions_report_async(space_id, suite))
 
+    def write_permissions_to_csv(self, report_data: Dict[str, Any], filename: str = None) -> Optional[str]:
+        """
+        Write permissions report data to a CSV file.
+        
+        Args:
+            report_data: The permissions report data from generate_all_permissions_report()
+            filename: Optional filename. If not provided, generates timestamp-based name.
+            
+        Returns:
+            The filename of the created CSV file
+        """
+        if not filename:
+            timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+            filename = f"kuali_permissions_report_{timestamp}.csv"
+        
+        if not report_data.get('success'):
+            logging.error("Cannot write CSV for failed report")
+            return None
+        
+        reports = report_data.get('reports', [])
+        
+        # Prepare CSV data
+        csv_rows = []
+        
+        for report in reports:
+            app_id = report.get('app_id', '')
+            app_name = report.get('app_name', '')
+            accepts_anonymous = report.get('accepts_anonymous_submissions', False)
+            
+            # Process admin users
+            admin_users = report.get('admin_users', [])
+            read_users = report.get('read_document_users', [])
+            
+            # Create rows for admin users
+            for admin_user in admin_users:
+                csv_rows.append({
+                    'App ID': app_id,
+                    'App Name': app_name,
+                    'Accepts Anonymous Submissions': accepts_anonymous,
+                    'Permission Type': 'Admin',
+                    'User Email': admin_user.get('email', 'no-email'),
+                    'User Display Name': admin_user.get('displayName', admin_user.get('name', 'Unknown')),
+                    'User School ID': admin_user.get('schoolId', 'no-school-id'),
+                    'User ID': admin_user.get('id', '')
+                })
+            
+            # Create rows for read document users
+            for read_user in read_users:
+                csv_rows.append({
+                    'App ID': app_id,
+                    'App Name': app_name,
+                    'Accepts Anonymous Submissions': accepts_anonymous,
+                    'Permission Type': 'Read Documents',
+                    'User Email': read_user.get('email', 'no-email'),
+                    'User Display Name': read_user.get('displayName', read_user.get('name', 'Unknown')),
+                    'User School ID': read_user.get('schoolId', 'no-school-id'),
+                    'User ID': read_user.get('id', '')
+                })
+            
+            # If no users, still add a row for the app
+            if not admin_users and not read_users:
+                csv_rows.append({
+                    'App ID': app_id,
+                    'App Name': app_name,
+                    'Accepts Anonymous Submissions': accepts_anonymous,
+                    'Permission Type': 'None',
+                    'User Email': '',
+                    'User Display Name': '',
+                    'User School ID': '',
+                    'User ID': ''
+                })
+        
+        # Write to CSV
+        fieldnames = ['App ID', 'App Name', 'Accepts Anonymous Submissions', 'Permission Type', 
+                     'User Email', 'User Display Name', 'User School ID', 'User ID']
+        
+        try:
+            with open(filename, 'w', newline='', encoding='utf-8') as csvfile:
+                writer = csv.DictWriter(csvfile, fieldnames=fieldnames)
+                writer.writeheader()
+                writer.writerows(csv_rows)
+            
+            logging.info(f"CSV report written to {filename}")
+            logging.info(f"Total rows: {len(csv_rows)}")
+            
+            # Log summary
+            total_apps = report_data.get('total_apps', 0)
+            successful_reports = report_data.get('successful_reports', 0)
+            failed_reports = report_data.get('failed_reports', 0)
+            
+            logging.info("Permissions Report Summary:")
+            logging.info(f"Total Applications: {total_apps}")
+            logging.info(f"Successful Reports: {successful_reports}")
+            logging.info(f"Failed Reports: {failed_reports}")
+            logging.info(f"CSV Export: {filename}")
+            logging.info(f"Total CSV Rows: {len(csv_rows)}")
+            
+            return filename
+            
+        except Exception as e:
+            logging.exception(f"Error writing CSV file: {e}")
+            return None
+
 
 def main():
     """
-    Example usage of the KualiPermissionsClient
+    Generate Kuali permissions report.
+    
+    Usage:
+        python permissions_client.py              # Generate report for all apps
+        python permissions_client.py <app_id>     # Generate report for single app
     """
     # Configure logging
-    logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
+    debug_mode = os.getenv('DEBUG', '').lower() in ['1', 'true', 'yes']
+    log_level = logging.DEBUG if debug_mode else logging.INFO
+    logging.basicConfig(level=log_level, format='%(asctime)s - %(levelname)s - %(message)s')
     
     # Load configuration from environment variables
     load_dotenv()
@@ -684,10 +858,67 @@ def main():
     
     client = KualiPermissionsClient(base_url, auth_token)
     
+    # Check if app ID provided as command line argument
+    single_app_id = None
+    if len(sys.argv) > 1:
+        single_app_id = sys.argv[1]
+        logging.info(f"Generating permissions report for single app: {single_app_id}")
+    else:
+        logging.info("Generating permissions report for all applications...")
+    
     try:
-        # Generate permissions report for all applications
-        all_reports = client.generate_all_permissions_report()
-        print(json.dumps(all_reports, indent=2))
+        if single_app_id:
+            # Generate report for single app
+            single_report = client.get_and_evaluate_permissions(single_app_id)
+            
+            if single_report.get('success'):
+                # Create a report structure similar to the all_reports format
+                report_data = {
+                    'success': True,
+                    'total_apps': 1,
+                    'successful_reports': 1,
+                    'failed_reports': 0,
+                    'reports': [single_report],
+                    'failed_apps': []
+                }
+                
+                # Write to CSV file with app-specific filename
+                timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+                filename = f"kuali_permissions_report_{single_app_id}_{timestamp}.csv"
+                csv_filename = client.write_permissions_to_csv(report_data, filename)
+                
+                if csv_filename:
+                    logging.info(f"Single app report successfully exported to: {csv_filename}")
+                    print(f"CSV_FILE:{csv_filename}")
+                else:
+                    logging.error("Failed to export CSV report")
+            else:
+                logging.error(f"Failed to generate report for app {single_app_id}")
+                logging.error(f"Error: {single_report.get('errors', 'Unknown error')}")
+                return
+        else:
+            # Generate permissions report for all applications
+            all_reports = client.generate_all_permissions_report()
+            
+            # Write to CSV file
+            csv_filename = client.write_permissions_to_csv(all_reports)
+            
+            if csv_filename:
+                logging.info(f"All apps report successfully exported to: {csv_filename}")
+                print(f"CSV_FILE:{csv_filename}")
+            else:
+                logging.error("Failed to export CSV report")
+                return
+            
+            report_data = all_reports
+        
+        # Output JSON for debugging if DEBUG environment variable is set
+        if os.getenv('DEBUG', '').lower() in ['1', 'true', 'yes']:
+            logging.debug("="*50)
+            logging.debug("DEBUG: JSON Output")
+            logging.debug("="*50)
+            logging.debug(json.dumps(report_data, indent=2))
+            
     except requests.RequestException as e:
         logging.exception(f"Error making request: {e}")
     except Exception as e:

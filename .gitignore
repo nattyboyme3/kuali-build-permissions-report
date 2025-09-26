@@ -37,3 +37,7 @@ ENV/
 # OS
 .DS_Store
 Thumbs.db
+
+# Outputs
+*.csv
+*.json
