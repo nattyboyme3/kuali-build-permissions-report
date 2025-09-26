@@ -143,27 +143,31 @@ echo "Sending email to $RECIPIENT..."
 if [ -n "$CSV_FILE" ] && [ -f "$CSV_FILE" ]; then
     # Send with CSV attachment
     if command -v uuencode >/dev/null 2>&1; then
-        # Use uuencode for attachment (more widely available)
+        # Use uuencode for attachment (most compatible across systems)
+        echo "Attaching CSV using uuencode..."
         {
             cat "$EMAIL_BODY"
             echo ""
             echo "--- CSV Report Attachment ---"
             uuencode "$CSV_FILE" "$(basename "$CSV_FILE")"
         } | mail -s "$SUBJECT" "$RECIPIENT"
+    elif command -v mutt >/dev/null 2>&1; then
+        # Use mutt if available (better attachment support)
+        echo "Attaching CSV using mutt..."
+        mutt -s "$SUBJECT" -a "$CSV_FILE" -- "$RECIPIENT" < "$EMAIL_BODY"
+    elif command -v mailx >/dev/null 2>&1 && mailx -h 2>&1 | grep -q "\-a"; then
+        # Use mailx with -a flag if supported (some Linux distributions)
+        echo "Attaching CSV using mailx..."
+        mailx -s "$SUBJECT" -a "$CSV_FILE" "$RECIPIENT" < "$EMAIL_BODY"
     else
-        # Fallback: try to use mail with attachment flag (if supported)
-        if mail -A "$CSV_FILE" -s "$SUBJECT" "$RECIPIENT" < "$EMAIL_BODY" 2>/dev/null; then
-            echo "Email sent with attachment using -A flag"
-        else
-            # Final fallback: include CSV content in email body
-            echo "Warning: Could not attach file, including CSV content in email body"
-            {
-                cat "$EMAIL_BODY"
-                echo ""
-                echo "--- CSV Report Content ---"
-                cat "$CSV_FILE"
-            } | mail -s "$SUBJECT" "$RECIPIENT"
-        fi
+        # Final fallback: include CSV content in email body
+        echo "Warning: No compatible mail command found for attachments, including CSV content in email body"
+        {
+            cat "$EMAIL_BODY"
+            echo ""
+            echo "--- CSV Report Content ---"
+            cat "$CSV_FILE"
+        } | mail -s "$SUBJECT" "$RECIPIENT"
     fi
 else
     # Send without attachment
