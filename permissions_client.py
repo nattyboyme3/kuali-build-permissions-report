@@ -542,6 +542,9 @@ class KualiPermissionsClient:
         
         admin_users = []
         read_document_users = []
+        update_document_users = []
+        create_document_users = []
+        delete_document_users = []
         
         # Extract users with specific permissions from policy groups
         policy_groups = app_data.get('listPolicyGroups', [])
@@ -566,17 +569,20 @@ class KualiPermissionsClient:
                             read_document_users.extend(user_objects)
                         elif 'apps:updateDocuments' in actions:
                             user_objects = await self.resolve_identities_to_users_async(session, identities, app_data.get('name'), 'UPDATE_DOCUMENTS')
-                            read_document_users.extend(user_objects)
+                            update_document_users.extend(user_objects)
                         elif 'apps:createDocuments' in actions:
                             user_objects = await self.resolve_identities_to_users_async(session, identities, app_data.get('name'), 'CREATE_DOCUMENTS')
-                            read_document_users.extend(user_objects)
+                            create_document_users.extend(user_objects)
                         elif 'apps:deleteDocuments' in actions:
                             user_objects = await self.resolve_identities_to_users_async(session, identities, app_data.get('name'), 'DELETE_DOCUMENTS')
-                            read_document_users.extend(user_objects)
+                            delete_document_users.extend(user_objects)
         
         # Remove duplicates while preserving order (using user ID as unique key)
         admin_users = list({user.get('id'): user for user in admin_users if user}.values())
         read_document_users = list({user.get('id'): user for user in read_document_users if user}.values())
+        update_document_users = list({user.get('id'): user for user in update_document_users if user}.values())
+        create_document_users = list({user.get('id'): user for user in create_document_users if user}.values())
+        delete_document_users = list({user.get('id'): user for user in delete_document_users if user}.values())
         
         return {
             'success': True,
@@ -584,7 +590,11 @@ class KualiPermissionsClient:
             'app_name': app_data.get('name'),
             'accepts_anonymous_submissions': app_data.get('canAnonymousCreate', False),
             'admin_users': admin_users,
-            'read_document_users': read_document_users
+            'read_document_users': read_document_users,
+            'update_document_users': update_document_users,
+            'create_document_users': create_document_users,
+            'delete_document_users': delete_document_users
+
         }
     
     def evaluate_permissions_data(self, data: Dict[str, Any]) -> Dict[str, Any]:
@@ -771,37 +781,29 @@ class KualiPermissionsClient:
             accepts_anonymous = report.get('accepts_anonymous_submissions', False)
             
             # Process admin users
-            admin_users = report.get('admin_users', [])
-            read_users = report.get('read_document_users', [])
-            
+            admin_users = (report.get('admin_users', []), "Admin")
+            read_users = (report.get('read_document_users', []), "Read Documents")
+            update_users = (report.get('update_document_users', []), "Update (edit) Documents")
+            create_users = (report.get('create_document_users', []), "Create (submit) Documents")
+            delete_users = (report.get('delete_document_users', []), "Delete Documents")
+            got_user = False
+            for group,permission in [admin_users, read_users, update_users, create_users, delete_users]:
             # Create rows for admin users
-            for admin_user in admin_users:
-                csv_rows.append({
-                    'App ID': app_id,
-                    'App Name': app_name,
-                    'Accepts Anonymous Submissions': accepts_anonymous,
-                    'Permission Type': 'Admin',
-                    'User Email': admin_user.get('email', 'no-email'),
-                    'User Display Name': admin_user.get('displayName', admin_user.get('name', 'Unknown')),
-                    'User School ID': admin_user.get('schoolId', 'no-school-id'),
-                    'User ID': admin_user.get('id', '')
-                })
-            
-            # Create rows for read document users
-            for read_user in read_users:
-                csv_rows.append({
-                    'App ID': app_id,
-                    'App Name': app_name,
-                    'Accepts Anonymous Submissions': accepts_anonymous,
-                    'Permission Type': 'Read Documents',
-                    'User Email': read_user.get('email', 'no-email'),
-                    'User Display Name': read_user.get('displayName', read_user.get('name', 'Unknown')),
-                    'User School ID': read_user.get('schoolId', 'no-school-id'),
-                    'User ID': read_user.get('id', '')
-                })
+                for user in group:
+                    got_user = True
+                    csv_rows.append({
+                        'App ID': app_id,
+                        'App Name': app_name,
+                        'Accepts Anonymous Submissions': accepts_anonymous,
+                        'Permission Type': permission,
+                        'User Email': user.get('email', 'no-email'),
+                        'User Display Name': user.get('displayName', user.get('name', 'Unknown')),
+                        'User School ID': user.get('schoolId', 'no-school-id'),
+                        'User ID': user.get('id', '')
+                    })
             
             # If no users, still add a row for the app
-            if not admin_users and not read_users:
+            if not got_user:
                 csv_rows.append({
                     'App ID': app_id,
                     'App Name': app_name,
