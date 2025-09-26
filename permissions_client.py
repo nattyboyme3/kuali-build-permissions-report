@@ -489,6 +489,8 @@ class KualiPermissionsClient:
             else:
                 if identity_label in ['faculty', 'staff', 'faculty (*all*)', 'staff (*all*)'] and permission_type != 'ADMIN':
                     logging.debug(f"{identity_type} has {identity_label} for non-admin permission on app {app_name}.")
+                elif permission_type == 'CREATE_DOCUMENTS':
+                    logging.debug(f"{identity_type} has {identity_label} on app {app_name}.")
                 else:
                     logging.warning(f"{identity_type} {identity_label} has {permission_type} access on app {app_name}.")
         
