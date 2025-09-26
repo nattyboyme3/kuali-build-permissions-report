@@ -562,6 +562,15 @@ class KualiPermissionsClient:
                         elif 'apps:readDocuments' in actions:
                             user_objects = await self.resolve_identities_to_users_async(session, identities, app_data.get('name'), 'READ_DOCUMENTS')
                             read_document_users.extend(user_objects)
+                        elif 'apps:updateDocuments' in actions:
+                            user_objects = await self.resolve_identities_to_users_async(session, identities, app_data.get('name'), 'UPDATE_DOCUMENTS')
+                            read_document_users.extend(user_objects)
+                        elif 'apps:createDocuments' in actions:
+                            user_objects = await self.resolve_identities_to_users_async(session, identities, app_data.get('name'), 'CREATE_DOCUMENTS')
+                            read_document_users.extend(user_objects)
+                        elif 'apps:deleteDocuments' in actions:
+                            user_objects = await self.resolve_identities_to_users_async(session, identities, app_data.get('name'), 'DELETE_DOCUMENTS')
+                            read_document_users.extend(user_objects)
         
         # Remove duplicates while preserving order (using user ID as unique key)
         admin_users = list({user.get('id'): user for user in admin_users if user}.values())

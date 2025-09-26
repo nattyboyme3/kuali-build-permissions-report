@@ -17,15 +17,17 @@ set -euo pipefail
 
 # Check if recipient email is provided
 if [ $# -lt 1 ]; then
-    echo "Usage: $0 <recipient_email> [app_id]"
+    echo "Usage: $0 <recipient_email(s)> [app_id]"
     echo ""
     echo "Examples:"
-    echo "  $0 admin@university.edu                    # Generate report for all apps"
-    echo "  $0 admin@university.edu 68b050dade5d57027  # Generate report for single app"
+    echo "  $0 admin@university.edu                              # Generate report for all apps"
+    echo "  $0 admin@university.edu 68b050dade5d57027            # Generate report for single app"
+    echo "  $0 admin@university.edu,user@university.edu         # Multiple recipients, all apps"
+    echo "  $0 'admin@university.edu, user@university.edu'      # Multiple recipients (quoted)"
     exit 1
 fi
 
-RECIPIENT="$1"
+RECIPIENTS="$1"
 APP_ID="${2:-}"
 
 # Check if mail command is available
@@ -52,7 +54,7 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 cd "$SCRIPT_DIR"
 
 echo "Starting Kuali Permissions Report..."
-echo "Recipient: $RECIPIENT"
+echo "Recipients: $RECIPIENTS"
 
 if [ -n "$APP_ID" ]; then
     echo "Mode: Single app report for $APP_ID"
@@ -91,7 +93,7 @@ if [ $EXIT_CODE -ne 0 ]; then
         echo ""
         echo "Standard output:"
         cat "$OUTPUT_FILE"
-    } | mail -s "ERROR: $SUBJECT" "$RECIPIENT"
+    } | mail -s "ERROR: $SUBJECT" "$RECIPIENTS"
     
     exit $EXIT_CODE
 fi
@@ -138,7 +140,7 @@ EMAIL_BODY="$TEMP_DIR/email_body.txt"
 } > "$EMAIL_BODY"
 
 # Send email with or without attachment
-echo "Sending email to $RECIPIENT..."
+echo "Sending email to: $RECIPIENTS"
 
 if [ -n "$CSV_FILE" ] && [ -f "$CSV_FILE" ]; then
     # Send with CSV attachment
@@ -150,15 +152,15 @@ if [ -n "$CSV_FILE" ] && [ -f "$CSV_FILE" ]; then
             echo ""
             echo "--- CSV Report Attachment ---"
             uuencode "$CSV_FILE" "$(basename "$CSV_FILE")"
-        } | mail -s "$SUBJECT" "$RECIPIENT"
+        } | mail -s "$SUBJECT" "$RECIPIENTS"
     elif command -v mutt >/dev/null 2>&1; then
         # Use mutt if available (better attachment support)
         echo "Attaching CSV using mutt..."
-        mutt -s "$SUBJECT" -a "$CSV_FILE" -- "$RECIPIENT" < "$EMAIL_BODY"
+        mutt -s "$SUBJECT" -a "$CSV_FILE" -- "$RECIPIENTS" < "$EMAIL_BODY"
     elif command -v mailx >/dev/null 2>&1 && mailx -h 2>&1 | grep -q "\-a"; then
         # Use mailx with -a flag if supported (some Linux distributions)
         echo "Attaching CSV using mailx..."
-        mailx -s "$SUBJECT" -a "$CSV_FILE" "$RECIPIENT" < "$EMAIL_BODY"
+        mailx -s "$SUBJECT" -a "$CSV_FILE" "$RECIPIENTS" < "$EMAIL_BODY"
     else
         # Final fallback: include CSV content in email body
         echo "Warning: No compatible mail command found for attachments, including CSV content in email body"
@@ -167,11 +169,11 @@ if [ -n "$CSV_FILE" ] && [ -f "$CSV_FILE" ]; then
             echo ""
             echo "--- CSV Report Content ---"
             cat "$CSV_FILE"
-        } | mail -s "$SUBJECT" "$RECIPIENT"
+        } | mail -s "$SUBJECT" "$RECIPIENTS"
     fi
 else
     # Send without attachment
-    mail -s "$SUBJECT" "$RECIPIENT" < "$EMAIL_BODY"
+    mail -s "$SUBJECT" "$RECIPIENTS" < "$EMAIL_BODY"
 fi
 
 echo "Email sent successfully!"
