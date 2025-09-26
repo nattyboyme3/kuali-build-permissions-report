@@ -7,6 +7,12 @@
 #   ./email_permissions_report.sh admin@university.edu                    # All apps report
 #   ./email_permissions_report.sh admin@university.edu 68b050dade5d57027  # Single app report
 
+# Get the directory where this script is located
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+
+# Activate virtual environment relative to script location
+source "$SCRIPT_DIR/venv/bin/activate"
+
 set -euo pipefail
 
 # Check if recipient email is provided
